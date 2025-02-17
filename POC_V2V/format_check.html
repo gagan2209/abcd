@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Audio Stream</title>
+</head>
+<body>
+    <button id="startBtn">Start Recording</button>
+    <button id="stopBtn" disabled>Stop Recording</button>
+
+    <script>
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        let mediaRecorder;
+        let socket;
+        let chunks = []; // Array to store audio chunks
+
+        startBtn.addEventListener('click', async () => {
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+                socket = new WebSocket('ws://localhost:8000'); // Connect to backend
+
+                socket.onopen = () => {
+                    console.log('WebSocket connection opened');
+
+                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm; codecs=opus' }); // Use opus if available
+
+                    mediaRecorder.ondataavailable = e => {
+                        if (e.data.size > 0) {
+                            chunks.push(e.data); // Store the chunk
+                            socket.send(e.data);  // Send chunk immediately
+                        }
+                    };
+
+                    mediaRecorder.onstop = () => {
+                        console.log('Recording stopped');
+                        const blob = new Blob(chunks, { type: 'audio/webm; codecs=opus' }); // Create final blob
+                        const url = URL.createObjectURL(blob); // Create a URL for the blob if needed
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = 'recording.webm'; // Set filename
+                        a.style.display = 'none';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                        chunks = []; // Clear the chunks array
+                    };
+
+                    mediaRecorder.start();
+                };
+
+                socket.onerror = error => {
+                    console.error('WebSocket error:', error);
+                    stopRecording();
+                };
+
+                socket.onclose = () => {
+                    console.log('WebSocket connection closed');
+                    stopRecording();
+                };
+
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            }
+        });
+
+        stopBtn.addEventListener('click', () => {
+            stopRecording();
+        });
+
+        function stopRecording() {
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                mediaRecorder.stop();
+            }
+
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.close();
+            }
+            if (mediaRecorder) {
+                mediaRecorder = null;
+            }
+        }
+    </script>
+</body>
+</html>

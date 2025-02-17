@@ -1,0 +1,173 @@
+<!--<!DOCTYPE html>-->
+<!--<html lang="en">-->
+<!--<head>-->
+<!--    <meta charset="UTF-8">-->
+<!--    <meta name="viewport" content="width=device-width, initial-scale=1.0">-->
+<!--    <title>Live Audio Streaming</title>-->
+<!--</head>-->
+<!--<body>-->
+<!--    <h2>Live Audio Streaming</h2>-->
+<!--    <button id="start">Start Recording</button>-->
+<!--    <button id="stop" disabled>Stop Recording</button>-->
+<!--    <p id="log"></p>-->
+
+<!--    <script>-->
+<!--        let socket;-->
+<!--        let mediaRecorder;-->
+<!--        let audioChunks = [];-->
+
+<!--        document.getElementById("start").addEventListener("click", async () => {-->
+<!--            socket = new WebSocket("ws://localhost:8000/stream");-->
+<!--            socket.binaryType = "arraybuffer";-->
+<!--            socket.onopen = () => console.log("WebSocket connected");-->
+<!--            socket.onmessage = (event) => console.log("Received from backend:", event.data);-->
+<!--            socket.onerror = (error) => console.error("WebSocket Error:", error);-->
+<!--            socket.onclose = () => console.log("WebSocket closed");-->
+
+<!--            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });-->
+<!--            mediaRecorder = new MediaRecorder(stream);-->
+
+<!--            mediaRecorder.ondataavailable = (event) => {-->
+<!--                if (event.data.size > 0 && socket.readyState === WebSocket.OPEN) {-->
+<!--                    socket.send(event.data);-->
+<!--                    document.getElementById("log").innerText = `Sent ${event.data.size} bytes to backend.`;-->
+<!--                }-->
+<!--            };-->
+
+<!--            mediaRecorder.start(500); // Send audio chunks every 500ms-->
+<!--            document.getElementById("start").disabled = true;-->
+<!--            document.getElementById("stop").disabled = false;-->
+<!--        });-->
+
+<!--        document.getElementById("stop").addEventListener("click", () => {-->
+<!--            mediaRecorder.stop();-->
+<!--            socket.close();-->
+<!--            document.getElementById("start").disabled = false;-->
+<!--            document.getElementById("stop").disabled = true;-->
+<!--        });-->
+<!--    </script>-->
+<!--</body>-->
+<!--</html>-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live Audio Streaming (Resampled to 16kHz)</title>
+</head>
+<body>
+  <h2>Live Audio Streaming</h2>
+  <button id="start">Start Recording</button>
+  <button id="stop" disabled>Stop Recording</button>
+  <p id="log"></p>
+
+  <script>
+    let socket;
+    let audioContext;
+    let mediaStream;
+    let processor;
+
+    // Helper function to resample a Float32Array buffer
+    async function resampleBuffer(buffer, inputSampleRate, targetSampleRate) {
+      // Calculate the required length for the resampled buffer
+      const targetLength = Math.ceil(buffer.length * targetSampleRate / inputSampleRate);
+
+      // Create an OfflineAudioContext for resampling
+      const offlineContext = new OfflineAudioContext(1, targetLength, targetSampleRate);
+
+      // Create an AudioBuffer in the source sample rate and copy the data
+      const audioBuffer = offlineContext.createBuffer(1, buffer.length, inputSampleRate);
+      audioBuffer.copyToChannel(buffer, 0, 0);
+
+      // Create a buffer source and connect it to the offline context
+      const source = offlineContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(offlineContext.destination);
+      source.start(0);
+
+      // Render the audio at the target sample rate
+      const renderedBuffer = await offlineContext.startRendering();
+
+      // Return the resampled data (Float32Array)
+      return renderedBuffer.getChannelData(0);
+    }
+
+    document.getElementById("start").addEventListener("click", async () => {
+      // Open WebSocket connection to your backend
+      socket = new WebSocket("ws://localhost:8000/stream");
+      socket.binaryType = "arraybuffer";
+      socket.onopen = () => console.log("WebSocket connected");
+      socket.onmessage = (event) => console.log("Received from backend:", event.data);
+      socket.onerror = (error) => console.error("WebSocket Error:", error);
+      socket.onclose = () => console.log("WebSocket closed");
+
+      // Request microphone access
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // Create an AudioContext (its sample rate is likely 44.1kHz or 48kHz)
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioContext.createMediaStreamSource(mediaStream);
+
+      // Create a ScriptProcessorNode for capturing audio chunks
+      // (4096 is the buffer size, 1 input channel, 1 output channel)
+      processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+      processor.onaudioprocess = async (event) => {
+        // Get raw float data from the microphone input
+        const inputData = event.inputBuffer.getChannelData(0);
+        const inputSampleRate = audioContext.sampleRate;
+        const targetSampleRate = 16000; // As required by NeuralSpace
+
+        // Resample the input if necessary
+        let resampledData;
+        if (inputSampleRate !== targetSampleRate) {
+          resampledData = await resampleBuffer(inputData, inputSampleRate, targetSampleRate);
+        } else {
+          resampledData = inputData;
+        }
+
+        // Convert the resampled Float32Array to a 16-bit PCM (little-endian) Int16Array
+        const int16Buffer = new Int16Array(resampledData.length);
+        for (let i = 0; i < resampledData.length; i++) {
+          // Clamp the float value between -1 and 1, then scale to int16 range
+          let s = Math.max(-1, Math.min(1, resampledData[i]));
+          int16Buffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
+
+        // Send the PCM data to the backend if the WebSocket is open
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(int16Buffer.buffer);
+          document.getElementById("log").innerText = `Sent ${int16Buffer.byteLength} bytes to backend.`;
+        }
+      };
+
+      // Connect the nodes: microphone source -> processor -> (optionally) audioContext.destination
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
+      // Update UI
+      document.getElementById("start").disabled = true;
+      document.getElementById("stop").disabled = false;
+    });
+
+    document.getElementById("stop").addEventListener("click", () => {
+      // Stop the processor and close audio
+      if (processor) {
+        processor.disconnect();
+      }
+      if (audioContext) {
+        audioContext.close();
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((track) => track.stop());
+      }
+      if (socket) {
+        socket.close();
+      }
+      document.getElementById("start").disabled = false;
+      document.getElementById("stop").disabled = true;
+    });
+  </script>
+</body>
+</html>

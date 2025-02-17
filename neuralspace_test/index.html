@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Stream</title>
+</head>
+<body>
+    <h1>Stream Audio to Backend</h1>
+    <button onclick="startStreaming()">Start Streaming</button>
+    <button onclick="stopStreaming()">Stop Streaming</button>
+
+    <!-- Element to show the transcription -->
+    <div>
+        <h2>Transcription</h2>
+        <div id="transcriptDisplay" style="border: 1px solid #000; padding: 10px; width: 300px; height: 200px; overflow-y: scroll;"></div>
+    </div>
+
+    <script>
+        let audioContext;
+        let processor;
+        let input;
+        let globalStream;
+        let socket;
+
+        const SAMPLE_RATE = 16000; // AWS Transcribe sample rate
+        const CHUNK_SIZE = 1024 * 2; // Equivalent to block size in sounddevice
+
+        function startStreaming() {
+    navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+            // Initialize the WebSocket connection to the backend
+            socket = new WebSocket('ws://localhost:8000');
+
+            socket.onopen = () => {
+                console.log('WebSocket connection established');
+
+                // Move the audio context setup here, inside the onopen callback
+                // This ensures we only start sending audio after the WebSocket is connected
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: SAMPLE_RATE
+                });
+
+                // Create an audio processor node
+                processor = audioContext.createScriptProcessor(CHUNK_SIZE, 1, 1);
+                processor.onaudioprocess = processAudio;
+
+                // Connect the microphone input to the processor
+                input = audioContext.createMediaStreamSource(stream);
+                input.connect(processor);
+                processor.connect(audioContext.destination);
+
+                globalStream = stream;
+            };
+
+            socket.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                stopStreaming();
+            };
+
+            socket.onclose = () => {
+                console.log('WebSocket connection closed');
+                stopStreaming();
+            };
+
+            socket.onmessage = (event) => {
+                const transcript = event.data;
+                displayTranscript(transcript);
+            };
+        })
+        .catch(err => {
+            console.error('Error accessing microphone:', err);
+        });
+     }
+
+        function processAudio(event) {
+    const inputData = event.inputBuffer.getChannelData(0);
+    const audioChunk = new Int16Array(inputData.length);
+
+    // Add this logging
+    console.log(`Processing audio chunk of length: ${inputData.length}`);
+
+    for (let i = 0; i < inputData.length; i++) {
+        let sample = Math.max(-1, Math.min(1, inputData[i]));  // Clip values
+        audioChunk[i] = sample * 32767;
+    }
+
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        // Add this logging
+        console.log(`Sending audio chunk of size: ${audioChunk.buffer.byteLength} bytes`);
+        socket.send(audioChunk.buffer);
+    } else {
+        // Add this logging
+        console.log('Socket not ready:', socket ? socket.readyState : 'no socket');
+    }
+    }
+
+        function stopStreaming() {
+            if (globalStream) {
+                // Stop the microphone stream
+                globalStream.getTracks().forEach(track => track.stop());
+            }
+
+            if (processor) {
+                // Disconnect the processor
+                processor.disconnect();
+            }
+
+            if (socket) {
+                // Close the WebSocket connection
+                socket.close();
+                console.log('WebSocket connection closed');
+            }
+
+            if (audioContext) {
+                // Close the audio context
+                audioContext.close();
+            }
+        }
+
+        function displayTranscript(transcript) {
+            // Display the transcription in the designated div
+            const transcriptDisplay = document.getElementById("transcriptDisplay");
+            transcriptDisplay.textContent += transcript + "\n";
+            transcriptDisplay.scrollTop = transcriptDisplay.scrollHeight;  // Scroll to the bottom
+        }
+
+    </script>
+</body>
+</html>
