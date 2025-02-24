@@ -11,7 +11,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from deepgram import DeepgramClient, LiveOptions, LiveTranscriptionEvents, DeepgramClientOptions, SpeakWebSocketEvents, SpeakWSOptions
 import logging
 import numpy as np
-from requests import session
+
 
 
 # Configure logging
